@@ -1,0 +1,70 @@
+name: Windows build
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [fix/m4t-super-resolution]
+
+jobs:
+  build:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: 3.29.3
+
+      - name: Build
+        run: |
+          flutter pub get
+          flutter build windows --release
+
+      - name: Build installer (unsigned)
+        run: |
+          # No code-signing certificate in CI: drop the SignTool directive
+          (Get-Content innosetup.iss) -notmatch '^SignTool=' | Set-Content innosetup-ci.iss
+          installtools\innosetup\ISCC.exe /Qp innosetup-ci.iss
+          Compress-Archive -Path build\windows\x64\runner\Release\* -DestinationPath dist\Thermal_Tools_portable.zip
+
+      - name: Smoke test with DJI sample images
+        run: |
+          $release = "build\windows\x64\runner\Release"
+          $exiftool = "$release\data\flutter_assets\assets\windows\exiftool.exe"
+
+          Invoke-WebRequest "https://terra-1-g.djicdn.com/2640963bcd8e45c0a4f0cb9829739d6b/TSDK/v1.9/dji_thermal_sdk_v1.9_20260526.zip" -OutFile tsdk.zip
+          Expand-Archive tsdk.zip -DestinationPath tsdk
+          $m4t = "tsdk\dji_thermal_sdk_v1.9_20260526\dataset\M4T"
+
+          New-Item -ItemType Directory smoke\normal, smoke\superres | Out-Null
+          Copy-Item "$m4t\*.JPG" smoke\normal
+
+          # Stand-in for a super-resolution capture: mode byte 3, Make/Model only in XMP
+          python .github\scripts\make_superres.py "$m4t\DJI_0001_R.JPG" smoke\superres\sr.JPG
+          & $exiftool -q -overwrite_original -XMP-tiff:Make=DJI -XMP-tiff:Model=M4T -IFD0:Make= -IFD0:Model= smoke\superres\sr.JPG
+          $before = (Get-FileHash smoke\superres\sr.JPG).Hash
+
+          foreach ($set in "normal", "superres") {
+            $dir = (Resolve-Path "smoke\$set").Path
+            Start-Process -FilePath "$release\thermal_tools.exe" -ArgumentList "--input", "`"$dir`"" -Wait
+            $jpgs = (Get-ChildItem "$dir\*.JPG").Count
+            $tifs = (Get-ChildItem "$dir\converted\*.tif" -ErrorAction SilentlyContinue).Count
+            Write-Host "$set : $tifs / $jpgs converted"
+            if ($tifs -ne $jpgs) { throw "$set conversion failed" }
+          }
+
+          $description = & $exiftool -s3 -XMP-dc:Description smoke\superres\converted\sr.tif
+          Write-Host "Description: $description"
+          if ($description -notmatch "super-resolution flag overridden") { throw "override note missing" }
+          if ((Get-FileHash smoke\superres\sr.JPG).Hash -ne $before) { throw "input file was modified" }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Thermal_Tools_Windows
+          path: |
+            dist/Thermal_Tools_Setup.exe
+            dist/Thermal_Tools_portable.zip
