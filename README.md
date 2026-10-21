@@ -54,6 +54,14 @@ You can also process thermal images remotely via a web API with [NodeThermalTool
  * DJI Mavic 3 Enterprise
  * DJI Matrice 4 Series
 
+### Matrice 4T super-resolution images
+
+Images captured with the infrared super-resolution (high-res) mode enabled are saved at 1280x1024, but the DJI Thermal SDK refuses to measure them. Thermal Tools converts them from their native 640x512 thermal data by overriding the SDK's super-resolution check on a temporary copy (your original images are not modified). The resulting TIFFs are 640x512 and are marked with an `XMP-dc:Description` note, and the console prints a note for each one.
+
+DJI does not document this mode for temperature measurement, and the absolute accuracy of these conversions has not been validated against DJI's own tools.
+
+In this mode the camera does not record lens EXIF tags (focal length, 35mm-equivalent focal length), so the TIFFs don't carry them either. GPS and gimbal metadata are preserved.
+
 
 ## Supported Platforms
 
