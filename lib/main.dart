@@ -10,6 +10,7 @@ import 'package:flutter/gestures.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:image/image.dart' as im;
 import 'tiff_encoder.dart';
+import 'rjpeg_fixup.dart';
 import 'input_slider/input_slider.dart';
 import 'input_slider/input_slider_form.dart';
 
@@ -82,6 +83,7 @@ class _HomePageState extends State<HomePage> {
   bool _canceled = false;
   int _processedFiles = 0;
   int _failedFiles = 0;
+  int _adjustedFiles = 0;
   String _lastError = "";
   bool _batchProcess = false;
   bool _overrideEnvParams = false;
@@ -229,11 +231,53 @@ class _HomePageState extends State<HomePage> {
     return (outFileRaw, width, height);
   }
 
-  Future<void> copyExifTags(String exifFile, String targetFile) async {
+  // Returns the file to hand to the DJI SDK, plus a temp dir to delete
+  // afterwards (null when the original is used as-is) and whether the
+  // super-resolution flag was overridden.
+  Future<(String, Directory?, bool)> prepareInput(String inFile) async {
+    final bytes = await File(inFile).readAsBytes();
+    final superResolution = isSuperResolution(bytes);
+    final missingMake = !hasExifMake(bytes);
+    if (!superResolution && !missingMake) return (inFile, null, false);
+
+    final tmpDir = await Directory.systemTemp.createTemp("thermal_tools_");
+    try {
+      final copy = p.join(tmpDir.path, p.basename(inFile));
+      await File(copy).writeAsBytes(
+          superResolution ? clearSuperResolution(bytes) : bytes,
+          flush: true);
+
+      if (missingMake) {
+        final process = await Process.run(getExifToolPath(), [
+          "-EXIF:Make<XMP:Make",
+          "-EXIF:Model<XMP:Model",
+          "-overwrite_original",
+          copy,
+        ]);
+        // exiftool exits 0 even when there was nothing to copy
+        if (process.exitCode != 0 ||
+            !process.stdout.toString().contains("1 image files updated")) {
+          throw "Cannot restore EXIF Make/Model: "
+              "${process.stdout.toString()}${process.stderr.toString()}";
+        }
+      }
+
+      return (copy, tmpDir, superResolution);
+    } catch (e) {
+      await tmpDir.delete(recursive: true);
+      rethrow;
+    }
+  }
+
+  Future<void> copyExifTags(String exifFile, String targetFile,
+      {bool superResolutionOverridden = false}) async {
     var process = await Process.run(getExifToolPath(), [
       "-config",
       getXmpConfigPath(),
       "-xmp:Camera:BandName=LWIR",
+      if (superResolutionOverridden)
+        "-XMP-dc:Description=DJI super-resolution flag overridden by Thermal "
+            "Tools; temperatures computed from the native 640x512 payload",
       "-tagsfromfile",
       exifFile,
       targetFile,
@@ -274,12 +318,29 @@ class _HomePageState extends State<HomePage> {
 
     if (_processing) {
       String outFileRaw = "";
+      Directory? tmpDir;
       int width = 640;
       int height = 512;
       try {
-        (outFileRaw, width, height) = await convertFileToRaw(f.path, outFile);
-        await convertRawToTiff(f.path, outFileRaw, width, height, outFile);
-        await copyExifTags(f.path, outFile);
+        String inFile;
+        bool superResolution;
+        (inFile, tmpDir, superResolution) = await prepareInput(f.path);
+        if (superResolution) {
+          print("Note: ${p.basename(f.path)} was captured in super-resolution "
+              "mode; overriding the DJI SDK super-resolution check. "
+              "Temperatures are computed from the native 640x512 payload.");
+        }
+
+        (outFileRaw, width, height) = await convertFileToRaw(inFile, outFile);
+        await convertRawToTiff(inFile, outFileRaw, width, height, outFile);
+        await copyExifTags(inFile, outFile,
+            superResolutionOverridden: superResolution);
+
+        if (superResolution) {
+          setState(() {
+            _adjustedFiles++;
+          });
+        }
       } catch (e) {
         setState(() {
           _failedFiles++;
@@ -291,6 +352,7 @@ class _HomePageState extends State<HomePage> {
           File f = File(outFileRaw);
           if (await f.exists()) await f.delete();
         }
+        if (tmpDir != null) await tmpDir.delete(recursive: true);
       }
       setState(() {
         _processedFiles++;
@@ -304,6 +366,7 @@ class _HomePageState extends State<HomePage> {
       _canceled = false;
       _processedFiles = 0;
       _failedFiles = 0;
+      _adjustedFiles = 0;
       _lastError = "";
     });
 
@@ -514,6 +577,13 @@ class _HomePageState extends State<HomePage> {
             style: Theme.of(context).textTheme.bodyLarge,
           ),
         ),
+        if (_adjustedFiles > 0)
+          Container(
+            margin: const EdgeInsets.only(bottom: 16.0),
+            child: Text(
+                "$_adjustedFiles super-resolution images were converted from "
+                "their native 640x512 thermal data (tagged in the output)."),
+          ),
         Container(
           margin: const EdgeInsets.only(bottom: 4.0),
           child: OutlinedButton(
