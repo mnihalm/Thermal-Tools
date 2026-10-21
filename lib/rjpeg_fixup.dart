@@ -44,11 +44,12 @@ List<_Segment> _segments(Uint8List bytes) {
 // "iirp" header with the super-resolution flag set.
 int _superResolutionModeIndex(Uint8List bytes) {
   for (final s in _segments(bytes)) {
-    if (s.marker != 0xE4) continue;
-    if (s.length <= _modeOffset) return -1;
+    if (s.marker != 0xE4 || s.length <= _modeOffset) continue;
+    var isIirp = true;
     for (var k = 0; k < _iirpMagic.length; k++) {
-      if (bytes[s.start + k] != _iirpMagic[k]) return -1;
+      if (bytes[s.start + k] != _iirpMagic[k]) isIirp = false;
     }
+    if (!isIirp) continue;
     final index = s.start + _modeOffset;
     return bytes[index] == _modeSuperResolution ? index : -1;
   }

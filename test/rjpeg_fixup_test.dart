@@ -96,6 +96,23 @@ void main() {
       expect(clearSuperResolution(input), input);
     });
 
+    test('finds the iirp header after another APP4 segment', () {
+      final other = app4Payload(magic: [1, 2, 3, 4, 5, 6, 7, 8], mode: 1);
+      final input = jpeg([
+        segment(0xE4, other),
+        segment(0xE4, app4Payload(mode: 3)),
+      ]);
+      expect(isSuperResolution(input), isTrue);
+      expect(isSuperResolution(clearSuperResolution(input)), isFalse);
+    });
+
+    test('APP4 too short to hold the mode byte is ignored', () {
+      final short = app4Payload(mode: 3).sublist(0, 128);
+      expect(isSuperResolution(jpeg([segment(0xE4, short)])), isFalse);
+      final justLongEnough = app4Payload(mode: 3).sublist(0, 129);
+      expect(isSuperResolution(jpeg([segment(0xE4, justLongEnough)])), isTrue);
+    });
+
     test('no APP4 segment means not super-resolution', () {
       expect(isSuperResolution(jpeg([segment(0xE1, exifPayload([make]))])),
           isFalse);
@@ -128,6 +145,24 @@ void main() {
       final xmp = 'http://ns.adobe.com/xap/1.0/\x00<x:xmpmeta tiff:Make="DJI"/>'
           .codeUnits;
       expect(hasExifMake(jpeg([segment(0xE1, xmp)])), isFalse);
+    });
+
+    test('finds Make in an Exif APP1 that follows an XMP APP1', () {
+      final xmp = 'http://ns.adobe.com/xap/1.0/\x00<x:xmpmeta/>'.codeUnits;
+      expect(
+          hasExifMake(
+              jpeg([segment(0xE1, xmp), segment(0xE1, exifPayload([make]))])),
+          isTrue);
+    });
+
+    test('IFD0 offset or entry count past the segment end has no Make', () {
+      final badOffset = exifPayload([make]);
+      badOffset[10] = 0xFF; // IFD0 offset (little-endian) -> far past the end
+      expect(hasExifMake(jpeg([segment(0xE1, badOffset)])), isFalse);
+
+      final badCount = exifPayload([orientation]);
+      badCount[14] = 50; // claims 50 entries, only 1 present
+      expect(hasExifMake(jpeg([segment(0xE1, badCount)])), isFalse);
     });
   });
 

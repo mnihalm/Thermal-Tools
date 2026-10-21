@@ -254,32 +254,44 @@ class _HomePageState extends State<HomePage> {
           "-overwrite_original",
           copy,
         ]);
-        // exiftool exits 0 even when there was nothing to copy
-        if (process.exitCode != 0 ||
-            !process.stdout.toString().contains("1 image files updated")) {
-          throw "Cannot restore EXIF Make/Model: "
-              "${process.stdout.toString()}${process.stderr.toString()}";
+        // Not fatal: let the DJI SDK decide whether it can read the file
+        if (process.exitCode != 0) {
+          print("Warning: cannot restore EXIF Make/Model for "
+              "${p.basename(inFile)}: ${process.stderr.toString()}");
         }
       }
 
       return (copy, tmpDir, superResolution);
     } catch (e) {
-      await tmpDir.delete(recursive: true);
+      await deleteTempDir(tmpDir);
       rethrow;
     }
   }
 
+  Future<void> deleteTempDir(Directory dir) async {
+    try {
+      await dir.delete(recursive: true);
+    } catch (e) {
+      print("Warning: cannot delete ${dir.path}: $e");
+    }
+  }
+
+  // [superResolution] carries the note and the actual output size for images
+  // whose source XMP describes the upscaled 1280x1024 visible image.
   Future<void> copyExifTags(String exifFile, String targetFile,
-      {bool superResolutionOverridden = false}) async {
+      {(String, int, int)? superResolution}) async {
     var process = await Process.run(getExifToolPath(), [
       "-config",
       getXmpConfigPath(),
       "-xmp:Camera:BandName=LWIR",
-      if (superResolutionOverridden)
-        "-XMP-dc:Description=DJI super-resolution flag overridden by Thermal "
-            "Tools; temperatures computed from the native 640x512 payload",
       "-tagsfromfile",
       exifFile,
+      // after -tagsfromfile so the source's values can't replace these
+      if (superResolution != null) ...[
+        "-XMP-dc:Description=${superResolution.$1}",
+        "-XMP-tiff:ImageWidth=${superResolution.$2}",
+        "-XMP-tiff:ImageHeight=${superResolution.$3}",
+      ],
       targetFile,
       "-overwrite_original_in_place",
     ]);
@@ -325,16 +337,18 @@ class _HomePageState extends State<HomePage> {
         String inFile;
         bool superResolution;
         (inFile, tmpDir, superResolution) = await prepareInput(f.path);
-        if (superResolution) {
-          print("Note: ${p.basename(f.path)} was captured in super-resolution "
-              "mode; overriding the DJI SDK super-resolution check. "
-              "Temperatures are computed from the native 640x512 payload.");
-        }
 
         (outFileRaw, width, height) = await convertFileToRaw(inFile, outFile);
         await convertRawToTiff(inFile, outFileRaw, width, height, outFile);
+
+        String? note;
+        if (superResolution) {
+          note = "DJI super-resolution flag overridden by Thermal Tools; "
+              "temperatures computed from the native ${width}x$height payload";
+          print("Note: ${p.basename(f.path)}: $note");
+        }
         await copyExifTags(inFile, outFile,
-            superResolutionOverridden: superResolution);
+            superResolution: note == null ? null : (note, width, height));
 
         if (superResolution) {
           setState(() {
@@ -352,7 +366,7 @@ class _HomePageState extends State<HomePage> {
           File f = File(outFileRaw);
           if (await f.exists()) await f.delete();
         }
-        if (tmpDir != null) await tmpDir.delete(recursive: true);
+        if (tmpDir != null) await deleteTempDir(tmpDir);
       }
       setState(() {
         _processedFiles++;
@@ -582,7 +596,7 @@ class _HomePageState extends State<HomePage> {
             margin: const EdgeInsets.only(bottom: 16.0),
             child: Text(
                 "$_adjustedFiles super-resolution images were converted from "
-                "their native 640x512 thermal data (tagged in the output)."),
+                "their native-resolution thermal data (tagged in the output)."),
           ),
         Container(
           margin: const EdgeInsets.only(bottom: 4.0),
