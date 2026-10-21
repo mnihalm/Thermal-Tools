@@ -60,6 +60,8 @@ Images captured with the infrared super-resolution (high-res) mode enabled are s
 
 DJI does not document this mode for temperature measurement, and the absolute accuracy of these conversions has not been validated against DJI's own tools.
 
+In this mode the camera does not record lens EXIF tags (focal length, 35mm-equivalent focal length), so the TIFFs don't carry them either. GPS and gimbal metadata are preserved.
+
 
 ## Supported Platforms
 
